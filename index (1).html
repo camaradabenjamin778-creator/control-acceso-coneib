@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Control de Acceso ANEIB</title><script src="https://unpkg.com/html5-qrcode"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f5f7;color:#111;font-family:Arial,sans-serif}header{background:#111}header img{display:block;width:100%;height:auto}.contenedor{max-width:900px;margin:auto;padding:22px}.panel,.contador{background:white;border-radius:15px;padding:22px;margin-bottom:20px;box-shadow:0 3px 12px #0001}.contador{text-align:center}.numero{font-size:56px;font-weight:bold}button{border:0;border-radius:10px;padding:14px 20px;font-size:16px;font-weight:bold;cursor:pointer}.principal{width:100%;background:#111;color:#fff;margin:10px 0}.secundario{background:#ddd}input{width:100%;padding:15px;font-size:17px;border:1px solid #bbb;border-radius:10px;margin:8px 0}.oculto{display:none!important}#login{max-width:460px;margin:45px auto;padding:24px}#panelScanner{position:fixed;inset:0;background:#fff;z-index:10;padding:20px;overflow:auto}#lectorQR{max-width:500px;margin:auto}#resultado{position:fixed;inset:0;z-index:20;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#fff;padding:25px}#resultado.verde{background:#20a957}#resultado.naranjo{background:#ed8b18}#resultado.rojo{background:#d62828}#resultado .icono{font-size:90px}#resultado .mensaje{font-size:30px;font-weight:bold;white-space:pre-line}#resultado button{margin-top:25px;background:#fff}.persona{border-top:1px solid #ddd;padding:14px 0}.persona strong{font-size:19px}.persona p{margin:5px 0;color:#555}.ultimo{padding:15px;border-radius:10px;background:#f0f0f0}#error{color:#b91c1c;white-space:pre-wrap}#estadoCamara{color:#555}
+</style></head><body>
+<header><img src="LOGO.png" alt="Logo ANEIB"></header>
+<section id="login" class="panel"><h2>Acceso de organizadores</h2><p>Ingresa tu PIN para comenzar.</p><input id="pin" type="password" autocomplete="off" placeholder="PIN de organizador"><button class="principal" id="btnLogin">INGRESAR</button><p id="error" role="alert"></p></section>
+<main id="app" class="contenedor oculto"><div class="contador"><div class="numero" id="contador">—</div><div>personas ingresadas</div><small id="total"></small></div><button class="principal" id="btnEscanear">ESCANEAR QR</button><div class="panel"><h2>Último ingreso</h2><div id="ultimoIngreso" class="ultimo">Todavía no hay ingresos registrados en esta sesión.</div></div><div class="panel"><h2>Buscar persona</h2><input id="busqueda" placeholder="Nombre, correo o ID..."><div id="resultados"></div></div><div class="panel"><h2>Validación manual</h2><input id="codigoManual" placeholder="Código de entrada"><button class="principal" id="btnManual">VALIDAR CÓDIGO</button></div><button class="secundario" id="btnSalir">CERRAR SESIÓN</button></main>
+<div id="panelScanner" class="oculto"><h2>Escanear QR</h2><div id="lectorQR"></div><p id="estadoCamara"></p><button class="principal" id="btnCerrarScanner">CERRAR ESCÁNER</button></div>
+<div id="resultado" class="oculto" role="alertdialog" aria-live="assertive"><div class="icono" id="resultadoIcono"></div><div class="mensaje" id="resultadoMensaje"></div><button id="btnContinuar">CONTINUAR</button></div>
+<div id="transportes" aria-hidden="true" style="display:none"></div>
+<script>
+// Reemplaza por la URL /exec de la implementación NUEVA de Apps Script.
+const API_URL = 'PEGA_AQUI_TU_URL_EXEC';
+let token = sessionStorage.getItem('aneib_token') || '';
+let scanner = null, iniciando = false, procesando = false;
+const $ = id => document.getElementById(id);
+const pendientes = new Map();
+function solicitud(accion, campos = {}) {
+  return new Promise((resolve, reject) => {
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(API_URL)) return reject(new Error('Configura API_URL en index.html'));
+    const id = crypto.randomUUID();
+    const marco = document.createElement('iframe');
+    marco.name = 'aneib_' + id;
+    marco.style.display = 'none';
+    const formulario = document.createElement('form');
+    formulario.method = 'POST'; formulario.action = API_URL; formulario.target = marco.name;
+    const datos = { accion, token, solicitud: id, ...campos };
+    for (const [clave, valor] of Object.entries(datos)) {
+      const campo = document.createElement('input'); campo.type = 'hidden'; campo.name = clave; campo.value = String(valor); formulario.appendChild(campo);
+    }
+    const limpiar = () => { clearTimeout(reloj); pendientes.delete(id); formulario.remove(); marco.remove(); };
+    const reloj = setTimeout(() => { limpiar(); reject(new Error('No llegó respuesta de Apps Script. Revisa permisos, FRONTEND_ORIGIN y la implementación.')); }, 18000);
+    pendientes.set(id, resultado => { limpiar(); resolve(resultado); });
+    $('transportes').append(marco, formulario);
+    formulario.submit();
+  });
+}
+window.addEventListener('message', evento => {
+  // Apps Script puede responder desde script.google.com o script.googleusercontent.com.
+  if (!/^https:\/\/([a-z0-9-]+\.)*(script\.google\.com|googleusercontent\.com)$/.test(evento.origin)) return;
+  let dato = evento.data;
+  if (typeof dato === 'string') { try { dato = JSON.parse(dato); } catch { return; } }
+  if (dato?.tipo !== 'ANEIB_RESPUESTA') return;
+  pendientes.get(dato.solicitud)?.(dato.resultado);
+});
+function exigirSesion(r) {
+  if (r.sesionExpirada) { cerrarSesion(false); throw new Error(r.mensaje); }
+  return r;
+}
+async function ingresar() {
+  $('error').textContent = '';
+  $('btnLogin').disabled = true;
+  try {
+    const r = await solicitud('login', { pin: $('pin').value });
+    if (!r.ok) throw new Error(r.mensaje || 'No se pudo iniciar sesión');
+    token = r.token; sessionStorage.setItem('aneib_token', token); $('pin').value = '';
+    mostrarApp();
+  } catch (e) { $('error').textContent = e.message; }
+  finally { $('btnLogin').disabled = false; }
+}
+function mostrarApp() { $('login').classList.add('oculto'); $('app').classList.remove('oculto'); actualizarContador(); }
+async function actualizarContador() {
+  try { const r = exigirSesion(await solicitud('contador')); if (!r.ok) throw new Error(r.mensaje); $('contador').textContent = r.ingresados; $('total').textContent = `${r.total} entradas en total`; }
+  catch (e) { console.error(e); $('total').textContent = e.message; }
+}
+async function abrirScanner() {
+  if (iniciando || scanner) return;
+  $('panelScanner').classList.remove('oculto'); $('estadoCamara').textContent = 'Iniciando cámara...';
+  iniciando = true;
+  try {
+    scanner = new Html5Qrcode('lectorQR');
+    await scanner.start({ facingMode:'environment' }, { fps:10, qrbox:{width:250,height:250} }, codigo => validar(codigo));
+    $('estadoCamara').textContent = 'Apunta al código QR.';
+  } catch (e) { $('estadoCamara').textContent = 'No se pudo iniciar la cámara: ' + e.message; scanner = null; }
+  finally { iniciando = false; }
+}
+async function cerrarScanner() {
+  while (iniciando) await new Promise(r => setTimeout(r, 80));
+  const anterior = scanner; scanner = null;
+  if (anterior) { try { await anterior.stop(); await anterior.clear(); } catch (e) { console.warn(e); } }
+  $('panelScanner').classList.add('oculto');
+}
+async function validar(codigo) {
+  if (procesando) return;
+  procesando = true;
+  await cerrarScanner();
+  try {
+    const r = exigirSesion(await solicitud('registrar', { id: codigo }));
+    const color = ['VERDE','NARANJO','ROJO'].includes(r.estado) ? r.estado.toLowerCase() : 'rojo';
+    mostrarResultado(color, r.mensaje || 'No se pudo validar', r.nombre || '');
+    if (color === 'verde') {
+      $('ultimoIngreso').textContent = `${r.nombre} — ID: ${r.id}`;
+      actualizarContador();
+    }
+  } catch (e) { mostrarResultado('rojo', 'ERROR DE CONEXIÓN', e.message); }
+}
+function mostrarResultado(color, mensaje, nombre) {
+  $('resultado').className = color;
+  $('resultadoIcono').textContent = color === 'verde' ? '✓' : color === 'naranjo' ? '!' : '✕';
+  $('resultadoMensaje').textContent = mensaje.toUpperCase() + (nombre ? '\n\n' + nombre : '');
+}
+function crearTexto(etiqueta, texto) { const el = document.createElement(etiqueta); el.textContent = texto; return el; }
+let retrasoBusqueda;
+async function buscarPersonas() {
+  const termino = $('busqueda').value.trim(); const panel = $('resultados'); panel.replaceChildren();
+  if (termino.length < 2) return;
+  try {
+    const r = exigirSesion(await solicitud('personas', { termino }));
+    if ($('busqueda').value.trim() !== termino) return;
+    if (!r.ok) throw new Error(r.mensaje);
+    if (!r.resultados.length) { panel.append(crearTexto('p', 'No se encontraron personas.')); return; }
+    for (const p of r.resultados) {
+      const div = document.createElement('div'); div.className = 'persona';
+      div.append(crearTexto('strong', p.nombre), crearTexto('p', p.email), crearTexto('p', 'ID: ' + p.id), crearTexto('p', 'Estado: ' + p.estado));
+      if (String(p.estado).toUpperCase() === 'INGRESADO') {
+        const boton = crearTexto('button', 'DESHACER INGRESO'); boton.className = 'secundario';
+        boton.addEventListener('click', () => deshacer(p.id)); div.append(boton);
+      }
+      panel.append(div);
+    }
+  } catch (e) { panel.replaceChildren(crearTexto('p', e.message)); }
+}
+async function deshacer(id) {
+  if (!confirm('¿Deshacer el ingreso de esta persona?')) return;
+  try {
+    const r = exigirSesion(await solicitud('deshacer', { id }));
+    if (!r.ok) throw new Error(r.mensaje);
+    alert('Ingreso deshecho correctamente'); actualizarContador(); buscarPersonas();
+  } catch (e) { alert(e.message); }
+}
+async function cerrarSesion(notificar = true) {
+  const anterior = token; token = ''; sessionStorage.removeItem('aneib_token');
+  $('app').classList.add('oculto'); $('login').classList.remove('oculto');
+  if (notificar && anterior) { try { await solicitud('salir', { token: anterior }); } catch (e) { console.warn(e); } }
+}
+$('btnLogin').addEventListener('click', ingresar);
+$('pin').addEventListener('keydown', e => { if (e.key === 'Enter') ingresar(); });
+$('btnEscanear').addEventListener('click', abrirScanner);
+$('btnCerrarScanner').addEventListener('click', cerrarScanner);
+$('btnContinuar').addEventListener('click', () => { $('resultado').className = 'oculto'; procesando = false; });
+$('btnManual').addEventListener('click', () => { const id = $('codigoManual').value.trim(); if (!id) return alert('Ingresa un código'); $('codigoManual').value = ''; validar(id); });
+$('busqueda').addEventListener('input', () => { clearTimeout(retrasoBusqueda); retrasoBusqueda = setTimeout(buscarPersonas, 350); });
+$('btnSalir').addEventListener('click', () => cerrarSesion(true));
+if (token) mostrarApp();
+</script></body></html>
